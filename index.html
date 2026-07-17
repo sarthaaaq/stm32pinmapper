@@ -1,0 +1,2176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>STM32H755ZIT6 Pin Assignment Tool</title>
+
+<!-- Inter font via Google CDN (only external dep, optional fallback to system-ui) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  /* ---------- THEME: CSS variables so colours are easy to tweak in one place ---------- */
+  :root {
+    --bg:            #0d1117;   /* page background */
+    --panel:         #161b22;   /* cards / panels */
+    --panel-2:       #1c2129;   /* slightly lighter surface */
+    --border:        #30363d;   /* all borders */
+    --border-soft:   #21262d;   /* softer inner borders */
+    --text:          #e6edf3;   /* primary text */
+    --text-dim:      #8b949e;   /* secondary text */
+    --text-faint:    #6b7280;   /* conflict text */
+    --accent:        #58a6ff;   /* blue accent */
+    --danger:        #f85149;
+    --success:       #3fb950;
+    --conflict-bg:   #1f2937;   /* conflicted pin background */
+
+    /* Peripheral family colours (from the spec) */
+    --fam-uart:   #7c3aed;
+    --fam-i2c:    #1d4ed8;
+    --fam-spi:    #0f766e;
+    --fam-fdcan:  #b45309;
+    --fam-eth:    #15803d;
+    --fam-adc:    #b91c1c;
+    --fam-tim:    #be185d;
+    --fam-gpio:   #374151;
+  }
+
+  /* ---------- BASELINE RESET ---------- */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    overflow: hidden; /* no body scroll, each panel scrolls internally */
+  }
+  button, input, select, textarea {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+  }
+  button { cursor: pointer; }
+
+  /* Scrollbar polish (dark) */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3d444d; }
+
+  /* ---------- APP SHELL: 3-panel grid ---------- */
+  #app {
+    display: grid;
+    grid-template-columns: 44px 1fr 340px;
+    height: 100vh;
+  }
+
+  /* ---------- PANEL 1: MCU HEADER (rotated chip name) ---------- */
+  #panel-mcu {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .mcu-label {
+    /* Rotate text vertically, top-to-bottom reading */
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--text-dim);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  /* ---------- PANEL 2: PERIPHERAL GRID (the main work area) ---------- */
+  #panel-grid {
+    overflow: auto;
+    padding: 0 16px 16px;     /* no top padding — sticky header provides its own */
+    background: var(--bg);
+  }
+  #panel-grid h2 {
+    font-size: 13px;
+    margin: 4px 0 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-weight: 600;
+  }
+
+  /* Peripheral family section divider */
+  .family-section { margin-bottom: 18px; }
+  .family-section > h3 {
+    font-size: 11px;
+    font-weight: 600;
+    margin: 4px 0 8px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    padding-left: 4px;
+  }
+
+  /* Grid controls bar: title + summary view toggle.
+     Sticky to top of #panel-grid so it stays visible while scrolling. */
+  .grid-controls {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg);
+    padding: 16px 0 12px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .grid-controls h2 { margin: 0; }
+  .grid-controls .view-count {
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+    margin-left: 8px;
+  }
+  /* Empty state for "in use only" view when nothing assigned yet */
+  .empty-state {
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 13px;
+    background: var(--panel);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+  }
+
+  /*
+    Peripheral group: the "spreadsheet row group" for ONE peripheral instance.
+    Columns (explicit): [1=label] [2=pins] [3=devices area]
+    - .periph-label spans all grid rows (visually merged)
+    - .pin-cell takes one grid row each (column 2)
+    - .devices-area spans all rows (column 3) and lays out device columns
+      side-by-side, each as a FULL-HEIGHT column.
+  */
+  .periph-group {
+    display: grid;
+    grid-template-columns: 88px 260px 1fr;
+    gap: 1px;
+    background: var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .periph-label {
+    grid-column: 1;               /* explicit: column 1 */
+    grid-row: 1 / -1;             /* span all rows */
+    background: var(--fam);       /* inline style sets --fam to the family colour */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 6px;
+    font-weight: 700;
+    color: #fff;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .pin-cell {
+    grid-column: 2;               /* explicit: column 2 */
+    background: var(--panel);
+    padding: 6px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+  }
+  .pin-cell .pin-name { font-weight: 600; color: var(--text); }
+  .pin-cell .pin-role { color: var(--text-dim); font-size: 10px; font-weight: 500; }
+  .pin-cell .pin-number {
+    color: var(--text-faint);
+    font-size: 10px;
+    margin-left: auto;
+    padding-left: 6px;
+  }
+  /* Conflicted pin: greyed-out with strikethrough and a note */
+  .pin-cell.conflict { background: var(--conflict-bg); }
+  .pin-cell.conflict .pin-name {
+    color: var(--text-faint);
+    text-decoration: line-through;
+  }
+  .pin-cell.conflict .pin-role { color: var(--text-faint); }
+  .pin-cell .conflict-note {
+    font-style: italic;
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-left: auto;
+    font-family: 'Inter', sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 65%;
+    cursor: help;            /* signals the title attribute on hover */
+  }
+
+  /*
+    Devices area (Col D onwards): horizontal flex row.
+    Each child is a full-height "column" (a device chip OR the drop zone).
+    Scrolls horizontally if many devices are chained.
+  */
+  .devices-area {
+    grid-column: 3;               /* explicit: column 3 */
+    grid-row: 1 / -1;             /* span all rows — full height */
+    display: flex;
+    flex-direction: row;
+    background: var(--panel);
+    min-height: 48px;
+    position: relative;
+    overflow-x: auto;
+    transition: background 0.12s ease;
+  }
+  /* Drag feedback is applied to the whole devices area */
+  .devices-area.drop-valid   { background: rgba(63, 185, 80, 0.12); outline: 1px dashed var(--success); outline-offset: -4px; }
+  .devices-area.drop-invalid { background: rgba(248, 81, 73, 0.10); outline: 1px dashed var(--danger);  outline-offset: -4px; cursor: not-allowed; }
+  .devices-area.drop-invalid::after {
+    content: '⛔ incompatible';
+    position: absolute;
+    top: 4px; right: 6px;
+    font-size: 10px;
+    color: var(--danger);
+    font-weight: 600;
+    pointer-events: none;
+  }
+
+  /*
+    Device CHIP = a vertical column spanning the full peripheral height.
+    Multiple chips sit side-by-side horizontally (Col D, Col E, Col F...).
+  */
+  .slot-chip {
+    flex: 0 0 auto;
+    min-width: 160px;
+    max-width: 240px;
+    background: var(--panel-2);
+    border-left: 3px solid var(--fam, var(--accent));
+    border-right: 1px solid var(--border-soft);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    cursor: grab;
+    user-select: none;
+    transition: background 0.1s ease;
+  }
+  .slot-chip:hover  { background: #22272e; }
+  .slot-chip.dragging { opacity: 0.4; }
+  .slot-chip .chip-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .slot-chip .chip-name {
+    font-weight: 600;
+    font-size: 13px;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .slot-chip .chip-type {
+    background: var(--border);
+    color: var(--text-dim);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+  .slot-chip .chip-pins {
+    color: var(--text-faint);
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .slot-chip .chip-notes {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-style: italic;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+  }
+  .slot-chip .chip-remove {
+    background: transparent;
+    border: 0;
+    color: var(--text-faint);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    margin-left: 2px;
+  }
+  .slot-chip .chip-remove:hover { color: var(--danger); }
+
+  /* ---------- ROLE DROPDOWNS (inside chip) ---------- */
+  /* Each role of a peripheral becomes a row: [LABEL] [<select>]
+     The dropdown lists candidate pins; pins owned by other peripherals
+     are disabled in the dropdown (still shown so user knows why). */
+  .slot-chip .roles-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 2px;
+  }
+  .slot-chip .role-row {
+    display: grid;
+    grid-template-columns: 50px 1fr;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+  }
+  .slot-chip .role-label {
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    text-align: right;
+  }
+  .slot-chip .role-label.required::after {
+    content: '*';
+    color: var(--danger);
+    margin-left: 1px;
+  }
+  .slot-chip .role-select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    width: 100%;
+    cursor: pointer;
+  }
+  .slot-chip .role-select:hover  { border-color: var(--accent); }
+  .slot-chip .role-select:focus  { outline: none; border-color: var(--accent); }
+  .slot-chip .role-select.empty  { color: var(--text-faint); border-style: dashed; }
+  .slot-chip .role-select.missing {
+    border-color: var(--danger);
+    background: rgba(248, 81, 73, 0.08);
+  }
+
+  /* Validation badge shown at the bottom of a chip when the assignment
+     fails its family rule (e.g. UART missing TX/RX, ADC missing channel). */
+  .slot-chip .validation-warning {
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.4);
+    color: var(--danger);
+    border-radius: 3px;
+    padding: 4px 6px;
+    font-size: 10px;
+    line-height: 1.3;
+    font-weight: 500;
+    margin-top: 4px;
+  }
+
+  /* ---------- GPIO BANK LAYOUT ----------
+     A GPIO bank groups one port (e.g. all of GPIOA) into a single visual card,
+     but EACH PIN gets its own slot — so claiming PA2 doesn't claim PA0/PA1/etc.
+     Structure: [bank label | stack of pin rows]
+                each pin row has [pin cell | devices area for that pin] */
+  .gpio-bank {
+    display: grid;
+    grid-template-columns: 88px 1fr;
+    gap: 1px;
+    background: var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .gpio-bank .periph-label {
+    grid-column: 1;            /* bank label sits in column 1 only */
+  }
+  .gpio-pins {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--border);
+  }
+  .gpio-pin-row {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 1px;
+    background: var(--border);
+  }
+  .gpio-pin-row .pin-cell {
+    grid-column: 1;
+    background: var(--panel);
+  }
+  .gpio-pin-row .devices-area {
+    grid-column: 2;
+    min-height: 38px;
+  }
+  /* GPIO drop zone is more compact than the multi-pin one */
+  .gpio-pin-row .drop-zone {
+    flex: 1;
+    border-left: 0;
+    font-size: 10px;
+  }
+  /* GPIO chips are smaller too — single role, simple display */
+  .gpio-pin-row .slot-chip {
+    min-width: 140px;
+    padding: 6px 8px;
+  }
+  .gpio-pin-row .slot-chip .chip-pins,
+  .gpio-pin-row .slot-chip .roles-list {
+    display: none;             /* not useful when pin is the row label */
+  }
+
+
+  .drop-zone {
+    flex: 1 1 140px;
+    min-width: 140px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    font-size: 11px;
+    font-style: italic;
+    padding: 8px;
+    text-align: center;
+    border-left: 1px dashed var(--border-soft);
+    pointer-events: none;   /* pass events up to .devices-area */
+  }
+  /* Hide the trailing drop zone when the peripheral is at capacity (UART max 1) */
+  .periph-group.full .drop-zone { display: none; }
+  .periph-group.full .devices-area { background: var(--panel-2); }
+  /* Same "full" behavior but scoped to individual GPIO pin rows,
+     so claiming PA2 doesn't dim/hide the drop zones on PA0, PA1, etc. */
+  .gpio-pin-row.full .drop-zone { display: none; }
+  .gpio-pin-row.full .devices-area { background: var(--panel-2); }
+
+  /* When the peripheral has no devices, the drop zone fills the whole area */
+  .devices-area.empty .drop-zone {
+    flex: 1;
+    border-left: 0;
+  }
+
+  /* ---------- PANEL 3: DEVICE TRAY ---------- */
+  #panel-tray {
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+    overflow: hidden;
+  }
+  .tray-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .tray-header h2 {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-weight: 600;
+  }
+  .btn {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.1s ease;
+  }
+  .btn:hover { background: var(--border); border-color: var(--accent); color: var(--accent); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  .btn-primary:hover { background: #79b8ff; border-color: #79b8ff; color: var(--bg); }
+
+  #device-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-right: 2px;
+  }
+  #device-list:empty::before {
+    content: 'No devices yet. Click "+ Add Device" to create one.';
+    color: var(--text-faint);
+    font-size: 12px;
+    font-style: italic;
+    padding: 20px 8px;
+    text-align: center;
+    display: block;
+  }
+  .tray-footer {
+    display: flex;
+    gap: 6px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .tray-footer .btn { flex: 1; font-size: 11px; }
+
+  /* Tray device card (draggable source) */
+  .tray-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--fam, var(--accent));
+    border-radius: 4px;
+    padding: 8px 10px;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+    transition: all 0.1s ease;
+  }
+  .tray-card:hover { border-color: var(--accent); }
+  .tray-card.dragging { opacity: 0.4; }
+  .tray-card.assigned { opacity: 0.5; } /* already placed, but still visible */
+  .tray-card .tc-name { font-weight: 600; flex: 1; }
+  .tray-card .tc-type {
+    background: var(--border);
+    color: var(--text-dim);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .tray-card .tc-del {
+    background: transparent;
+    border: 0;
+    color: var(--text-faint);
+    font-size: 14px;
+    padding: 0 4px;
+  }
+  .tray-card .tc-del:hover { color: var(--danger); }
+
+  /* ---------- MODAL ---------- */
+  #modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  #modal-overlay.hidden { display: none; }
+  #modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 22px 24px;
+    width: 380px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  }
+  #modal h3 {
+    margin: 0 0 16px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  #modal label {
+    display: block;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+  #modal input[type="text"],
+  #modal select,
+  #modal textarea {
+    width: 100%;
+    margin-top: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 7px 10px;
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+  }
+  #modal input:focus,
+  #modal select:focus,
+  #modal textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  #modal textarea { resize: vertical; min-height: 60px; }
+  .modal-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .modal-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin: -6px 0 10px;
+    min-height: 16px;
+  }
+
+  /* Toast (small transient status message) */
+  #toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-size: 12px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    z-index: 2000;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { border-left-color: var(--danger); }
+  #toast.success { border-left-color: var(--success); }
+</style>
+</head>
+
+<body>
+
+<!-- Main three-panel application shell -->
+<div id="app">
+
+  <!-- Panel 1: MCU chip identifier (rotated label) -->
+  <div id="panel-mcu">
+    <div class="mcu-label">STM32H755ZIT6 • LQFP144</div>
+  </div>
+
+  <!-- Panel 2: peripheral grid — populated by JS -->
+  <main id="panel-grid">
+    <div class="grid-controls">
+      <h2>
+        Peripheral Pin Assignments
+        <span class="view-count" id="view-count"></span>
+      </h2>
+      <button id="toggle-view-btn" class="btn" title="Toggle between all peripherals and only those in use">
+        📋 In-use only
+      </button>
+    </div>
+    <div id="grid-root"></div>
+  </main>
+
+  <!-- Panel 3: device tray (define + manage devices) -->
+  <aside id="panel-tray">
+    <div class="tray-header">
+      <h2>Devices</h2>
+      <button id="add-device-btn" class="btn btn-primary">+ Add Device</button>
+    </div>
+    <div id="device-list"></div>
+    <div class="tray-footer">
+      <button id="export-btn" class="btn">⬇ Export JSON</button>
+      <button id="import-btn" class="btn">⬆ Import JSON</button>
+      <!-- Hidden file input, triggered by import button -->
+      <input type="file" id="import-input" accept=".json,application/json" hidden />
+    </div>
+  </aside>
+</div>
+
+<!-- Add Device modal -->
+<div id="modal-overlay" class="hidden" aria-hidden="true">
+  <div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title">Add Device</h3>
+    <form id="device-form" novalidate>
+      <label>
+        Name
+        <input type="text" id="device-name" required maxlength="40" placeholder="e.g. BMP390" />
+      </label>
+      <label>
+        Interface Type
+        <select id="device-type" required>
+          <option value="">Select…</option>
+          <option value="UART">UART</option>
+          <option value="USART">USART</option>
+          <option value="I2C">I2C</option>
+          <option value="SPI">SPI</option>
+          <option value="FDCAN">FDCAN</option>
+          <option value="ETH">ETH</option>
+          <option value="ADC">ADC</option>
+          <option value="PWM">PWM</option>
+          <option value="GPIO">GPIO</option>
+        </select>
+      </label>
+      <label>
+        Notes
+        <textarea id="device-notes" rows="3" placeholder="optional"></textarea>
+      </label>
+      <div class="modal-error" id="modal-error"></div>
+      <div class="modal-buttons">
+        <button type="button" class="btn" id="modal-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Toast for status messages -->
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* =============================================================================
+   STM32H755ZIT6 Pin Assignment Tool
+   Single-file vanilla JS — no frameworks.
+   Data -> State -> Render -> Event handlers -> Persistence
+   ============================================================================= */
+
+
+/* ---------------------------------------------------------------------------
+   1. PIN DATA — extracted directly from the STM32H755xI datasheet (DS12919).
+      Maps pin name -> { lqfp144_pin number, alternate_functions[] }.
+      Only used for display hints and the AF lookup (NOT the source of truth
+      for conflicts — that's PERIPHERAL_DEFS below).
+   --------------------------------------------------------------------------- */
+const PIN_DATA = {
+  "PE2":  { lqfp144_pin: 1,   alternate_functions: ["TRACECLK","SAI1_CK1","SPI4_SCK","SAI1_MCLK_A","SAI4_MCLK_A","QUADSPI_BK1_IO2","SAI4_CK1","ETH_MII_TXD3","FMC_A23"] },
+  "PE3":  { lqfp144_pin: 2,   alternate_functions: ["TRACED0","TIM15_BKIN","SAI1_SD_B","SAI4_SD_B","FMC_A19"] },
+  "PE4":  { lqfp144_pin: 3,   alternate_functions: ["TRACED1","SAI1_D2","DFSDM1_DATIN3","TIM15_CH1N","SPI4_NSS","SAI1_FS_A","SAI4_FS_A","SAI4_D2","FMC_A20","DCMI_D4","LCD_B0"] },
+  "PE5":  { lqfp144_pin: 4,   alternate_functions: ["TRACED2","SAI1_CK2","DFSDM1_CKIN3","TIM15_CH1","SPI4_MISO","SAI1_SCK_A","SAI4_SCK_A","SAI4_CK2","FMC_A21","DCMI_D6","LCD_G0"] },
+  "PE6":  { lqfp144_pin: 5,   alternate_functions: ["TRACED3","TIM1_BKIN2","SAI1_D1","TIM15_CH2","SPI4_MOSI","SAI1_SD_A","SAI4_SD_A","SAI4_D1","SAI2_MCLK_B","TIM1_BKIN2_COMP12","FMC_A22","DCMI_D7","LCD_G1"] },
+  "PC13": { lqfp144_pin: 9,   alternate_functions: [] },
+  "PC14": { lqfp144_pin: 10,  alternate_functions: [] },
+  "PC15": { lqfp144_pin: 11,  alternate_functions: [] },
+  "PF6":  { lqfp144_pin: 20,  alternate_functions: ["TIM16_CH1","SPI5_NSS","SAI1_SD_B","UART7_RX","SAI4_SD_B","QUADSPI_BK1_IO3","ADC3_INP8"] },
+  "PF7":  { lqfp144_pin: 21,  alternate_functions: ["TIM17_CH1","SPI5_SCK","SAI1_MCLK_B","UART7_TX","SAI4_MCLK_B","QUADSPI_BK1_IO2","ADC3_INP3"] },
+  "PF8":  { lqfp144_pin: 22,  alternate_functions: ["TIM16_CH1N","SPI5_MISO","SAI1_SCK_B","UART7_RTS","SAI4_SCK_B","TIM13_CH1","QUADSPI_BK1_IO0","ADC3_INP7"] },
+  "PF9":  { lqfp144_pin: 23,  alternate_functions: ["TIM17_CH1N","SPI5_MOSI","SAI1_FS_B","UART7_CTS","SAI4_FS_B","TIM14_CH1","QUADSPI_BK1_IO1","ADC3_INP2"] },
+  "PF10": { lqfp144_pin: 24,  alternate_functions: ["TIM16_BKIN","SAI1_D3","QUADSPI_CLK","SAI4_D3","DCMI_D11","LCD_DE","ADC3_INP6"] },
+  "PH0":  { lqfp144_pin: 25,  alternate_functions: ["OSC_IN"] },
+  "PH1":  { lqfp144_pin: 26,  alternate_functions: ["OSC_OUT"] },
+  "PC0":  { lqfp144_pin: 28,  alternate_functions: ["DFSDM1_CKIN0","DFSDM1_DATIN4","SAI2_FS_B","OTG_HS_ULPI_STP","FMC_SDNWE","LCD_R5","ADC123_INP10"] },
+  "PC1":  { lqfp144_pin: 29,  alternate_functions: ["TRACED0","SAI1_D1","DFSDM1_DATIN0","DFSDM1_CKIN4","SPI2_MOSI","SAI1_SD_A","SAI4_SD_A","SDMMC2_CK","SAI4_D1","ETH_MDC","MDIOS_MDC","ADC123_INP11"] },
+  "PA0":  { lqfp144_pin: 37,  alternate_functions: ["TIM2_CH1","TIM5_CH1","TIM8_ETR","TIM15_BKIN","USART2_CTS","UART4_TX","SDMMC2_CMD","SAI2_SD_B","ETH_MII_CRS","ADC1_INP16"] },
+  "PA1":  { lqfp144_pin: 38,  alternate_functions: ["TIM2_CH2","TIM5_CH2","LPTIM3_OUT","TIM15_CH1N","USART2_RTS","UART4_RX","QUADSPI_BK1_IO3","SAI2_MCLK_B","ETH_MII_RX_CLK","ETH_RMII_REF_CLK","LCD_R2","ADC1_INP17"] },
+  "PA2":  { lqfp144_pin: 39,  alternate_functions: ["TIM2_CH3","TIM5_CH3","LPTIM4_OUT","TIM15_CH1","USART2_TX","SAI2_SCK_B","ETH_MDIO","MDIOS_MDIO","LCD_R1","ADC12_INP14"] },
+  "PA3":  { lqfp144_pin: 40,  alternate_functions: ["TIM2_CH4","TIM5_CH4","LPTIM5_OUT","TIM15_CH2","USART2_RX","LCD_B2","OTG_HS_ULPI_D0","ETH_MII_COL","LCD_B5","ADC12_INP15"] },
+  "PA4":  { lqfp144_pin: 43,  alternate_functions: ["TIM5_ETR","SPI1_NSS","SPI3_NSS","USART2_CK","SPI6_NSS","OTG_HS_SOF","DCMI_HSYNC","LCD_VSYNC","ADC12_INP18","DAC1_OUT1"] },
+  "PA5":  { lqfp144_pin: 44,  alternate_functions: ["TIM2_CH1","TIM8_CH1N","SPI1_SCK","SPI6_SCK","OTG_HS_ULPI_CK","LCD_R4","ADC12_INP19","DAC1_OUT2"] },
+  "PA6":  { lqfp144_pin: 45,  alternate_functions: ["TIM1_BKIN","TIM3_CH1","TIM8_BKIN","SPI1_MISO","SPI6_MISO","TIM13_CH1","MDIOS_MDC","DCMI_PIXCLK","LCD_G2","ADC12_INP3"] },
+  "PA7":  { lqfp144_pin: 46,  alternate_functions: ["TIM1_CH1N","TIM3_CH2","TIM8_CH1N","SPI1_MOSI","SPI6_MOSI","TIM14_CH1","ETH_MII_RX_DV","ETH_RMII_CRS_DV","FMC_SDNWE","ADC12_INP7"] },
+  "PC4":  { lqfp144_pin: 47,  alternate_functions: ["DFSDM1_CKIN2","I2S1_MCK","SPDIFRX1_IN3","ETH_MII_RXD0","ETH_RMII_RXD0","FMC_SDNE0","ADC12_INP4"] },
+  "PC5":  { lqfp144_pin: 48,  alternate_functions: ["SAI1_D3","DFSDM1_DATIN2","SPDIFRX1_IN4","SAI4_D3","ETH_MII_RXD1","ETH_RMII_RXD1","FMC_SDCKE0","ADC12_INP8"] },
+  "PB0":  { lqfp144_pin: 49,  alternate_functions: ["TIM1_CH2N","TIM3_CH3","TIM8_CH2N","DFSDM1_CKOUT","UART4_CTS","LCD_R3","OTG_HS_ULPI_D1","ETH_MII_RXD2","LCD_G1","ADC12_INP9"] },
+  "PB1":  { lqfp144_pin: 50,  alternate_functions: ["TIM1_CH3N","TIM3_CH4","TIM8_CH3N","DFSDM1_DATIN1","LCD_R6","OTG_HS_ULPI_D2","ETH_MII_RXD3","LCD_G0","ADC12_INP5"] },
+  "PB2":  { lqfp144_pin: 51,  alternate_functions: ["RTC_OUT","SAI1_D1","DFSDM1_CKIN1","SAI1_SD_A","SPI3_MOSI","SAI4_SD_A","QUADSPI_CLK","SAI4_D1","ETH_TX_ER"] },
+  "PF11": { lqfp144_pin: 52,  alternate_functions: ["SPI5_MOSI","SAI2_SD_B","FMC_SDNRAS","DCMI_D12","ADC1_INP2"] },
+  "PF14": { lqfp144_pin: 53,  alternate_functions: ["DFSDM1_CKIN6","I2C4_SCL","FMC_A8","ADC2_INP6"] },
+  "PF15": { lqfp144_pin: 54,  alternate_functions: ["I2C4_SDA","FMC_A9"] },
+  "PE7":  { lqfp144_pin: 57,  alternate_functions: ["TIM1_ETR","DFSDM1_DATIN2","UART7_RX","QUADSPI_BK2_IO0","FMC_D4"] },
+  "PE8":  { lqfp144_pin: 58,  alternate_functions: ["TIM1_CH1N","DFSDM1_CKIN2","UART7_TX","QUADSPI_BK2_IO1","FMC_D5"] },
+  "PE9":  { lqfp144_pin: 59,  alternate_functions: ["TIM1_CH1","DFSDM1_CKOUT","UART7_RTS","QUADSPI_BK2_IO2","FMC_D6"] },
+  "PE10": { lqfp144_pin: 60,  alternate_functions: ["TIM1_CH2N","DFSDM1_DATIN4","UART7_CTS","QUADSPI_BK2_IO3","FMC_D7"] },
+  "PE11": { lqfp144_pin: 61,  alternate_functions: ["TIM1_CH2","DFSDM1_CKIN4","SPI4_NSS","SAI2_SD_B","FMC_D8","LCD_G3"] },
+  "PE12": { lqfp144_pin: 62,  alternate_functions: ["TIM1_CH3N","DFSDM1_DATIN5","SPI4_SCK","SAI2_SCK_B","FMC_D9","LCD_B4"] },
+  "PE13": { lqfp144_pin: 63,  alternate_functions: ["TIM1_CH3","DFSDM1_CKIN5","SPI4_MISO","SAI2_FS_B","FMC_D10","LCD_DE"] },
+  "PE14": { lqfp144_pin: 64,  alternate_functions: ["TIM1_CH4","SPI4_MOSI","SAI2_MCLK_B","FMC_D11","LCD_CLK"] },
+  "PE15": { lqfp144_pin: 65,  alternate_functions: ["TIM1_BKIN","FMC_D12","LCD_R7"] },
+  "PB10": { lqfp144_pin: 66,  alternate_functions: ["TIM2_CH3","HRTIM_SCOUT","LPTIM2_IN1","I2C2_SCL","SPI2_SCK","DFSDM1_DATIN7","USART3_TX","QUADSPI_BK1_NCS","OTG_HS_ULPI_D3","ETH_MII_RX_ER","LCD_G4"] },
+  "PB11": { lqfp144_pin: 67,  alternate_functions: ["TIM2_CH4","HRTIM_SCIN","LPTIM2_ETR","I2C2_SDA","DFSDM1_CKIN7","USART3_RX","OTG_HS_ULPI_D4","ETH_MII_TX_EN","ETH_RMII_TX_EN","LCD_G5"] },
+  "PB12": { lqfp144_pin: 72,  alternate_functions: ["TIM1_BKIN","I2C2_SMBA","SPI2_NSS","DFSDM1_DATIN1","USART3_CK","FDCAN2_RX","OTG_HS_ULPI_D5","ETH_MII_TXD0","ETH_RMII_TXD0","OTG_HS_ID","TIM1_BKIN_COMP12","UART5_RX"] },
+  "PB13": { lqfp144_pin: 73,  alternate_functions: ["TIM1_CH1N","LPTIM2_OUT","SPI2_SCK","DFSDM1_CKIN1","USART3_CTS","FDCAN2_TX","OTG_HS_ULPI_D6","ETH_MII_TXD1","ETH_RMII_TXD1","UART5_TX"] },
+  "PB14": { lqfp144_pin: 74,  alternate_functions: ["TIM1_CH2N","TIM12_CH1","TIM8_CH2N","USART1_TX","SPI2_MISO","DFSDM1_DATIN2","USART3_RTS","UART4_RTS","SDMMC2_D0","OTG_HS_DM"] },
+  "PB15": { lqfp144_pin: 75,  alternate_functions: ["RTC_REFIN","TIM1_CH3N","TIM12_CH2","TIM8_CH3N","USART1_RX","SPI2_MOSI","DFSDM1_CKIN2","UART4_CTS","SDMMC2_D1","OTG_HS_DP"] },
+  "PD8":  { lqfp144_pin: 76,  alternate_functions: ["DFSDM1_CKIN3","SAI3_SCK_B","USART3_TX","SPDIFRX1_IN2","FMC_D13"] },
+  "PD9":  { lqfp144_pin: 77,  alternate_functions: ["DFSDM1_DATIN3","SAI3_SD_B","USART3_RX","FMC_D14"] },
+  "PD10": { lqfp144_pin: 78,  alternate_functions: ["DFSDM1_CKOUT","SAI3_FS_B","USART3_CK","FMC_D15","LCD_B3"] },
+  "PD11": { lqfp144_pin: 81,  alternate_functions: ["LPTIM2_IN2","I2C4_SMBA","USART3_CTS","QUADSPI_BK1_IO0","SAI2_SD_A","FMC_A16"] },
+  "PD12": { lqfp144_pin: 82,  alternate_functions: ["LPTIM1_IN1","TIM4_CH1","LPTIM2_IN1","I2C4_SCL","USART3_RTS","QUADSPI_BK1_IO1","SAI2_FS_A","FMC_A17"] },
+  "PD13": { lqfp144_pin: 83,  alternate_functions: ["LPTIM1_OUT","TIM4_CH2","I2C4_SDA","QUADSPI_BK1_IO3","SAI2_SCK_A","FMC_A18"] },
+  "PD14": { lqfp144_pin: 84,  alternate_functions: ["TIM4_CH3","SAI3_MCLK_B","UART8_CTS","FMC_D0"] },
+  "PD15": { lqfp144_pin: 85,  alternate_functions: ["TIM4_CH4","SAI3_MCLK_A","UART8_RTS","FMC_D1"] },
+  "PG6":  { lqfp144_pin: 86,  alternate_functions: ["TIM17_BKIN","HRTIM_CHE1","QUADSPI_BK1_NCS","FMC_NE3","DCMI_D12","LCD_R7"] },
+  "PG7":  { lqfp144_pin: 87,  alternate_functions: ["HRTIM_CHE2","SAI1_MCLK_A","USART6_CK","FMC_INT","DCMI_D13","LCD_CLK"] },
+  "PG8":  { lqfp144_pin: 88,  alternate_functions: ["TIM8_ETR","SPI6_NSS","USART6_RTS","SPDIFRX1_IN3","ETH_PPS_OUT","FMC_SDCLK","LCD_G7"] },
+  "PC6":  { lqfp144_pin: 93,  alternate_functions: ["HRTIM_CHA1","TIM3_CH1","TIM8_CH1","DFSDM1_CKIN3","I2S2_MCK","USART6_TX","SDMMC1_D0DIR","FMC_NWAIT","SDMMC2_D6","SDMMC1_D6","DCMI_D0","LCD_HSYNC"] },
+  "PC7":  { lqfp144_pin: 94,  alternate_functions: ["HRTIM_CHA2","TIM3_CH2","TIM8_CH2","DFSDM1_DATIN3","I2S3_MCK","USART6_RX","SDMMC1_D123DIR","FMC_NE1","SDMMC2_D7","SDMMC1_D7","DCMI_D1","LCD_G6"] },
+  "PC8":  { lqfp144_pin: 95,  alternate_functions: ["HRTIM_CHB1","TIM3_CH3","TIM8_CH3","USART6_CK","UART5_RTS","FMC_NE2","SDMMC1_D0","DCMI_D2"] },
+  "PC9":  { lqfp144_pin: 96,  alternate_functions: ["MCO2","TIM3_CH4","TIM8_CH4","I2C3_SDA","UART5_CTS","QUADSPI_BK1_IO0","LCD_G3","SDMMC1_D1","DCMI_D3","LCD_B2"] },
+  "PA8":  { lqfp144_pin: 97,  alternate_functions: ["MCO1","TIM1_CH1","HRTIM_CHB2","TIM8_BKIN2","I2C3_SCL","USART1_CK","OTG_FS_SOF","UART7_RX","LCD_B3","LCD_R6"] },
+  "PA9":  { lqfp144_pin: 98,  alternate_functions: ["TIM1_CH2","HRTIM_CHC1","LPUART1_TX","I2C3_SMBA","SPI2_SCK","USART1_TX","ETH_TX_ER","DCMI_D0","LCD_R5"] },
+  "PA10": { lqfp144_pin: 99,  alternate_functions: ["TIM1_CH3","HRTIM_CHC2","LPUART1_RX","USART1_RX","OTG_FS_ID","MDIOS_MDIO","LCD_B4","DCMI_D1","LCD_B1"] },
+  "PA11": { lqfp144_pin: 100, alternate_functions: ["TIM1_CH4","HRTIM_CHD1","LPUART1_CTS","SPI2_NSS","UART4_RX","USART1_CTS","FDCAN1_RX","OTG_FS_DM","LCD_R4"] },
+  "PA12": { lqfp144_pin: 101, alternate_functions: ["TIM1_ETR","HRTIM_CHD2","LPUART1_RTS","SPI2_SCK","UART4_TX","USART1_RTS","SAI2_FS_B","FDCAN1_TX","OTG_FS_DP","LCD_R5"] },
+  "PA13": { lqfp144_pin: 102, alternate_functions: ["JTMS_SWDIO"] },
+  "PA14": { lqfp144_pin: 107, alternate_functions: ["JTCK_SWCLK"] },
+  "PA15": { lqfp144_pin: 108, alternate_functions: ["JTDI","TIM2_CH1","HRTIM_FLT1","CEC","SPI1_NSS","SPI3_NSS","SPI6_NSS","UART4_RTS","UART7_TX"] },
+  "PC10": { lqfp144_pin: 109, alternate_functions: ["HRTIM_EEV1","DFSDM1_CKIN5","SPI3_SCK","USART3_TX","UART4_TX","QUADSPI_BK1_IO1","SDMMC1_D2","DCMI_D8","LCD_R2"] },
+  "PC11": { lqfp144_pin: 110, alternate_functions: ["HRTIM_FLT2","DFSDM1_DATIN5","SPI3_MISO","USART3_RX","UART4_RX","QUADSPI_BK2_NCS","SDMMC1_D3","DCMI_D4"] },
+  "PC12": { lqfp144_pin: 111, alternate_functions: ["HRTIM_EEV2","SPI3_MOSI","USART3_CK","UART5_TX","SDMMC1_CK","DCMI_D9"] },
+  "PD0":  { lqfp144_pin: 112, alternate_functions: ["DFSDM1_CKIN6","SAI3_SCK_A","UART4_RX","FDCAN1_RX","FMC_D2"] },
+  "PD1":  { lqfp144_pin: 113, alternate_functions: ["DFSDM1_DATIN6","SAI3_SD_A","UART4_TX","FDCAN1_TX","FMC_D3"] },
+  "PD2":  { lqfp144_pin: 114, alternate_functions: ["TIM3_ETR","UART5_RX","SDMMC1_CMD","DCMI_D11"] },
+  "PD3":  { lqfp144_pin: 115, alternate_functions: ["DFSDM1_CKOUT","SPI2_SCK","USART2_CTS","FMC_CLK","DCMI_D5","LCD_G7"] },
+  "PD4":  { lqfp144_pin: 116, alternate_functions: ["HRTIM_FLT3","SAI3_FS_A","USART2_RTS","FMC_NOE"] },
+  "PD5":  { lqfp144_pin: 117, alternate_functions: ["HRTIM_EEV3","USART2_TX","FMC_NWE"] },
+  "PD6":  { lqfp144_pin: 120, alternate_functions: ["SAI1_D1","DFSDM1_CKIN4","DFSDM1_DATIN1","SPI3_MOSI","SAI1_SD_A","USART2_RX","SAI4_SD_A","SAI4_D1","SDMMC2_CK","FMC_NWAIT","DCMI_D10","LCD_B2"] },
+  "PD7":  { lqfp144_pin: 121, alternate_functions: ["DFSDM1_DATIN4","SPI1_MOSI","DFSDM1_CKIN1","USART2_CK","SPDIFRX1_IN1","SDMMC2_CMD","FMC_NE1"] },
+  "PG9":  { lqfp144_pin: 122, alternate_functions: ["SPI1_MISO","USART6_RX","SPDIFRX1_IN4","QUADSPI_BK2_IO2","SAI2_FS_B","FMC_NE2","DCMI_VSYNC"] },
+  "PG10": { lqfp144_pin: 123, alternate_functions: ["HRTIM_FLT5","SPI1_NSS","LCD_G3","SAI2_SD_B","FMC_NE3","DCMI_D2","LCD_B2"] },
+  "PG11": { lqfp144_pin: 124, alternate_functions: ["LPTIM1_IN2","HRTIM_EEV4","SPI1_SCK","SPDIFRX1_IN1","SDMMC2_D2","ETH_MII_TX_EN","ETH_RMII_TX_EN","DCMI_D3","LCD_B3"] },
+  "PG12": { lqfp144_pin: 125, alternate_functions: ["LPTIM1_IN1","HRTIM_EEV5","SPI6_MISO","USART6_RTS","SPDIFRX1_IN2","LCD_B4","ETH_MII_TXD1","ETH_RMII_TXD1","FMC_NE4","LCD_B1"] },
+  "PG13": { lqfp144_pin: 126, alternate_functions: ["LPTIM1_OUT","HRTIM_EEV10","SPI6_SCK","USART6_CTS","ETH_MII_TXD0","ETH_RMII_TXD0","FMC_A24","LCD_R0"] },
+  "PG14": { lqfp144_pin: 127, alternate_functions: ["LPTIM1_ETR","SPI6_MOSI","USART6_TX","QUADSPI_BK2_IO3","ETH_MII_TXD1","ETH_RMII_TXD1","FMC_A25","LCD_B0"] },
+  "PB3":  { lqfp144_pin: 130, alternate_functions: ["JTDO","TIM2_CH2","HRTIM_FLT4","SPI1_SCK","SPI3_SCK","SPI6_SCK","SDMMC2_D2","CRS_SYNC","UART7_RX"] },
+  "PB4":  { lqfp144_pin: 131, alternate_functions: ["NJTRST","TIM16_BKIN","TIM3_CH1","HRTIM_EEV6","SPI1_MISO","SPI3_MISO","SPI2_NSS","SPI6_MISO","SDMMC2_D3","UART7_TX"] },
+  "PB5":  { lqfp144_pin: 132, alternate_functions: ["TIM17_BKIN","TIM3_CH2","HRTIM_EEV7","I2C1_SMBA","SPI1_MOSI","I2C4_SMBA","SPI3_MOSI","SPI6_MOSI","FDCAN2_RX","OTG_HS_ULPI_D7","ETH_PPS_OUT","FMC_SDCKE1","DCMI_D10","UART5_RX"] },
+  "PB6":  { lqfp144_pin: 133, alternate_functions: ["TIM16_CH1N","TIM4_CH1","HRTIM_EEV8","I2C1_SCL","CEC","I2C4_SCL","USART1_TX","LPUART1_TX","FDCAN2_TX","QUADSPI_BK1_NCS","DFSDM1_DATIN5","FMC_SDNE1","DCMI_D5","UART5_TX"] },
+  "PB7":  { lqfp144_pin: 134, alternate_functions: ["TIM17_CH1N","TIM4_CH2","HRTIM_EEV9","I2C1_SDA","I2C4_SDA","USART1_RX","LPUART1_RX","DFSDM1_CKIN5","FMC_NL","DCMI_VSYNC"] },
+  "PB8":  { lqfp144_pin: 136, alternate_functions: ["TIM16_CH1","TIM4_CH3","DFSDM1_CKIN7","I2C1_SCL","I2C4_SCL","SDMMC1_CKIN","UART4_RX","FDCAN1_RX","SDMMC2_D4","ETH_MII_TXD3","SDMMC1_D4","DCMI_D6","LCD_B6"] },
+  "PB9":  { lqfp144_pin: 137, alternate_functions: ["TIM17_CH1","TIM4_CH4","DFSDM1_DATIN7","I2C1_SDA","SPI2_NSS","I2C4_SDA","SDMMC1_CDIR","UART4_TX","FDCAN1_TX","SDMMC2_D5","I2C4_SMBA","SDMMC1_D5","DCMI_D7","LCD_B7"] },
+  "PE0":  { lqfp144_pin: 138, alternate_functions: ["LPTIM1_ETR","TIM4_ETR","HRTIM_SCIN","LPTIM2_ETR","UART8_RX","SAI2_MCLK_A","FMC_NBL0","DCMI_D2"] },
+  "PE1":  { lqfp144_pin: 139, alternate_functions: ["LPTIM1_IN2","HRTIM_SCOUT","UART8_TX","FMC_NBL1","DCMI_D3"] }
+};
+
+
+/* ---------------------------------------------------------------------------
+   2. FAMILY METADATA — maps each family to colour + which device interface
+      types it accepts + maxDevices per instance.
+      UART/USART peripherals accept both 'UART' and 'USART' device types.
+   --------------------------------------------------------------------------- */
+const FAMILIES = {
+  // selectionRule:
+  //   'all-required' — every role marked required:true must have a pin selected
+  //   'at-least-one' — any one role with a pin selected is enough (e.g. ADC channels)
+  UART:  { color: 'var(--fam-uart)',  accepts: ['UART','USART'], max: 1,        title: 'UART / USART', selectionRule: 'all-required' },
+  I2C:   { color: 'var(--fam-i2c)',   accepts: ['I2C'],          max: Infinity, title: 'I2C',          selectionRule: 'all-required' },
+  SPI:   { color: 'var(--fam-spi)',   accepts: ['SPI'],          max: Infinity, title: 'SPI',          selectionRule: 'all-required' },
+  FDCAN: { color: 'var(--fam-fdcan)', accepts: ['FDCAN'],        max: Infinity, title: 'FDCAN',        selectionRule: 'all-required' },
+  ETH:   { color: 'var(--fam-eth)',   accepts: ['ETH'],          max: 1,        title: 'Ethernet',     selectionRule: 'all-required' },
+  ADC:   { color: 'var(--fam-adc)',   accepts: ['ADC'],          max: Infinity, title: 'ADC',          selectionRule: 'at-least-one' },
+  TIM:   { color: 'var(--fam-tim)',   accepts: ['PWM'],          max: Infinity, title: 'Timers / PWM', selectionRule: 'at-least-one' },
+  GPIO:  { color: 'var(--fam-gpio)',  accepts: ['GPIO'],         max: 1,        title: 'GPIO',         selectionRule: 'all-required' },
+};
+
+
+/* ---------------------------------------------------------------------------
+   3. PERIPHERAL DEFINITIONS — the source of truth for pin conflicts.
+      Each peripheral has a list of ROLES (TX, RX, SCL, etc.). Each role has:
+        - role:     human label
+        - required: must this be assigned a pin?
+        - pins:     candidate pin(s) the user can pick from
+      When a device is assigned to a peripheral, the user picks one pin per role
+      (defaults are auto-selected on drop). Only those specific pins are claimed.
+   --------------------------------------------------------------------------- */
+const PERIPHERAL_DEFS = [
+  // ---- UART / USART (purple) — TX+RX required, others optional ----
+  { family: 'UART',  name: 'USART1', roles: [
+    { role: 'TX',  required: true,  pins: ['PA9'] },
+    { role: 'RX',  required: true,  pins: ['PA10'] },
+    { role: 'CK',  required: false, pins: ['PA8'] },
+    { role: 'CTS', required: false, pins: ['PA11'] },
+    { role: 'RTS', required: false, pins: ['PA12'] },
+  ]},
+  { family: 'UART',  name: 'USART2', roles: [
+    { role: 'TX', required: true, pins: ['PA2','PD5'] },
+    { role: 'RX', required: true, pins: ['PA3','PD6'] },
+  ]},
+  { family: 'UART',  name: 'USART3', roles: [
+    { role: 'TX', required: true, pins: ['PD8','PB10'] },
+    { role: 'RX', required: true, pins: ['PD9','PB11'] },
+  ]},
+  { family: 'UART',  name: 'UART4', roles: [
+    { role: 'TX', required: true, pins: ['PA0','PC10','PD1'] },
+    { role: 'RX', required: true, pins: ['PA1','PC11','PD0'] },
+  ]},
+  { family: 'UART',  name: 'UART5', roles: [
+    { role: 'TX', required: true, pins: ['PC12','PB13'] },
+    { role: 'RX', required: true, pins: ['PD2','PB12'] },
+  ]},
+  { family: 'UART',  name: 'USART6', roles: [
+    { role: 'TX', required: true, pins: ['PC6','PG14'] },
+    { role: 'RX', required: true, pins: ['PC7','PG9'] },
+  ]},
+  { family: 'UART',  name: 'UART7', roles: [
+    { role: 'TX', required: true, pins: ['PF7','PE8'] },
+    { role: 'RX', required: true, pins: ['PF6','PE7','PA8','PB3'] },
+  ]},
+  { family: 'UART',  name: 'UART8', roles: [
+    { role: 'TX',  required: true,  pins: ['PE1'] },
+    { role: 'RX',  required: true,  pins: ['PE0'] },
+    { role: 'CTS', required: false, pins: ['PD14'] },
+    { role: 'RTS', required: false, pins: ['PD15'] },
+  ]},
+
+  // ---- I2C (blue) — SCL + SDA required ----
+  { family: 'I2C', name: 'I2C1', roles: [
+    { role: 'SCL', required: true, pins: ['PB6','PB8'] },
+    { role: 'SDA', required: true, pins: ['PB7','PB9'] },
+  ]},
+  { family: 'I2C', name: 'I2C2', roles: [
+    { role: 'SCL', required: true, pins: ['PB10'] },
+    { role: 'SDA', required: true, pins: ['PB11'] },
+  ]},
+  { family: 'I2C', name: 'I2C3', roles: [
+    { role: 'SCL', required: true, pins: ['PA8'] },
+    { role: 'SDA', required: true, pins: ['PC9'] },
+  ]},
+  { family: 'I2C', name: 'I2C4', roles: [
+    { role: 'SCL', required: true, pins: ['PF14','PD12'] },
+    { role: 'SDA', required: true, pins: ['PF15','PD13'] },
+  ]},
+
+  // ---- SPI (teal) — SCK/MISO/MOSI required, NSS optional (software CS is common) ----
+  { family: 'SPI', name: 'SPI1', roles: [
+    { role: 'SCK',  required: true,  pins: ['PA5'] },
+    { role: 'MISO', required: true,  pins: ['PA6'] },
+    { role: 'MOSI', required: true,  pins: ['PA7'] },
+    { role: 'NSS',  required: false, pins: ['PA4'] },
+  ]},
+  { family: 'SPI', name: 'SPI2', roles: [
+    { role: 'SCK',  required: true,  pins: ['PB13'] },
+    { role: 'MISO', required: true,  pins: ['PB14'] },
+    { role: 'MOSI', required: true,  pins: ['PB15'] },
+    { role: 'NSS',  required: false, pins: ['PB12'] },
+  ]},
+  { family: 'SPI', name: 'SPI3', roles: [
+    { role: 'SCK',  required: true,  pins: ['PB3'] },
+    { role: 'MISO', required: true,  pins: ['PB4'] },
+    { role: 'MOSI', required: true,  pins: ['PB5'] },
+    { role: 'NSS',  required: false, pins: ['PA4'] },
+  ]},
+  { family: 'SPI', name: 'SPI4', roles: [
+    { role: 'SCK',  required: true,  pins: ['PE12'] },
+    { role: 'MISO', required: true,  pins: ['PE13'] },
+    { role: 'MOSI', required: true,  pins: ['PE14'] },
+    { role: 'NSS',  required: false, pins: ['PE11'] },
+  ]},
+  { family: 'SPI', name: 'SPI5', roles: [
+    { role: 'SCK',  required: true,  pins: ['PF7'] },
+    { role: 'MISO', required: true,  pins: ['PF8'] },
+    { role: 'MOSI', required: true,  pins: ['PF9'] },
+    { role: 'NSS',  required: false, pins: ['PF6'] },
+  ]},
+  { family: 'SPI', name: 'SPI6', roles: [
+    { role: 'SCK',  required: true,  pins: ['PG13'] },
+    { role: 'MISO', required: true,  pins: ['PG12'] },
+    { role: 'MOSI', required: true,  pins: ['PG14'] },
+    { role: 'NSS',  required: false, pins: ['PG8'] },
+  ]},
+
+  // ---- FDCAN (orange) — TX + RX required ----
+  { family: 'FDCAN', name: 'FDCAN1', roles: [
+    { role: 'TX', required: true, pins: ['PD1','PA12','PB9'] },
+    { role: 'RX', required: true, pins: ['PD0','PA11','PB8'] },
+  ]},
+  { family: 'FDCAN', name: 'FDCAN2', roles: [
+    { role: 'TX', required: true, pins: ['PB13','PB6'] },
+    { role: 'RX', required: true, pins: ['PB12','PB5'] },
+  ]},
+
+  // ---- Ethernet (green) — RMII pins all required, no choice ----
+  { family: 'ETH', name: 'ETH (RMII)', roles: [
+    { role: 'REF_CLK', required: true, pins: ['PA1'] },
+    { role: 'MDIO',    required: true, pins: ['PA2'] },
+    { role: 'CRS_DV',  required: true, pins: ['PA7'] },
+    { role: 'MDC',     required: true, pins: ['PC1'] },
+    { role: 'RXD0',    required: true, pins: ['PC4'] },
+    { role: 'RXD1',    required: true, pins: ['PC5'] },
+    { role: 'TX_EN',   required: true, pins: ['PG11'] },
+    { role: 'TXD0',    required: true, pins: ['PG13'] },
+    { role: 'TXD1',    required: true, pins: ['PG14'] },
+  ]},
+
+  // ---- ADC (red) — channels are independent, at-least-one rule ----
+  // Each role here is one ADC INP channel. User picks one channel per device.
+  // Multiple ADC devices can be chained on the same ADC instance, each picking
+  // a different channel.
+  { family: 'ADC', name: 'ADC1', roles: [
+    { role: 'INP16', required: false, pins: ['PA0'] },
+    { role: 'INP17', required: false, pins: ['PA1'] },
+    { role: 'INP14', required: false, pins: ['PA2'] },
+    { role: 'INP15', required: false, pins: ['PA3'] },
+    { role: 'INP18', required: false, pins: ['PA4'] },
+    { role: 'INP19', required: false, pins: ['PA5'] },
+    { role: 'INP3',  required: false, pins: ['PA6'] },
+    { role: 'INP7',  required: false, pins: ['PA7'] },
+  ]},
+  { family: 'ADC', name: 'ADC2', roles: [
+    { role: 'INP10', required: false, pins: ['PC0'] },
+    { role: 'INP11', required: false, pins: ['PC1'] },
+    { role: 'INP4',  required: false, pins: ['PC4'] },
+    { role: 'INP8',  required: false, pins: ['PC5'] },
+    { role: 'INP9',  required: false, pins: ['PB0'] },
+    { role: 'INP5',  required: false, pins: ['PB1'] },
+  ]},
+  { family: 'ADC', name: 'ADC3', roles: [
+    { role: 'INP8', required: false, pins: ['PF6'] },
+    { role: 'INP3', required: false, pins: ['PF7'] },
+    { role: 'INP7', required: false, pins: ['PF8'] },
+    { role: 'INP2', required: false, pins: ['PF9'] },
+    { role: 'INP6', required: false, pins: ['PF10'] },
+  ]},
+
+  // ---- Timers / PWM (pink) — channels independent, at-least-one rule ----
+  { family: 'TIM', name: 'TIM1', roles: [
+    { role: 'CH1', required: false, pins: ['PA8'] },
+    { role: 'CH2', required: false, pins: ['PA9'] },
+    { role: 'CH3', required: false, pins: ['PA10'] },
+    { role: 'CH4', required: false, pins: ['PA11'] },
+  ]},
+  { family: 'TIM', name: 'TIM2', roles: [
+    { role: 'CH1', required: false, pins: ['PA0'] },
+    { role: 'CH2', required: false, pins: ['PA1'] },
+    { role: 'CH3', required: false, pins: ['PA2'] },
+    { role: 'CH4', required: false, pins: ['PA3'] },
+  ]},
+  { family: 'TIM', name: 'TIM3', roles: [
+    { role: 'CH1', required: false, pins: ['PC6'] },
+    { role: 'CH2', required: false, pins: ['PC7'] },
+    { role: 'CH3', required: false, pins: ['PC8'] },
+    { role: 'CH4', required: false, pins: ['PC9'] },
+  ]},
+  { family: 'TIM', name: 'TIM4', roles: [
+    { role: 'CH1', required: false, pins: ['PD12'] },
+    { role: 'CH2', required: false, pins: ['PD13'] },
+    { role: 'CH3', required: false, pins: ['PD14'] },
+    { role: 'CH4', required: false, pins: ['PD15'] },
+  ]},
+  { family: 'TIM', name: 'TIM8', roles: [
+    { role: 'CH1', required: false, pins: ['PC6'] },
+    { role: 'CH2', required: false, pins: ['PC7'] },
+    { role: 'CH3', required: false, pins: ['PC8'] },
+    { role: 'CH4', required: false, pins: ['PC9'] },
+  ]},
+];
+
+/* ---------------------------------------------------------------------------
+   4. GPIO DEFINITIONS — built programmatically: ONE PERIPHERAL PER PIN.
+      Each pin (e.g. PA0) becomes its own peripheral instance with a single
+      role 'PIN' that has only that pin as a candidate. This way a GPIO device
+      assigned to PA2 only claims PA2, not the whole GPIOA bank.
+      The `port` field is used for visual grouping in renderGpioBank().
+   --------------------------------------------------------------------------- */
+function buildGpioDefs() {
+  // Group all PIN_DATA entries by port letter (A from PA0, B from PB0, ...)
+  const byPort = {};
+  for (const pinName of Object.keys(PIN_DATA)) {
+    const port = pinName[1]; // second char is the port letter
+    if (!byPort[port]) byPort[port] = [];
+    byPort[port].push(pinName);
+  }
+  // Sort pins within a port numerically (PA0, PA1, PA2, ..., PA15)
+  const defs = [];
+  for (const port of ['A','B','C','D','E','F','G','H']) {
+    if (!byPort[port]) continue;
+    const sorted = byPort[port].sort((a, b) => {
+      return parseInt(a.slice(2)) - parseInt(b.slice(2));
+    });
+    // Each individual pin becomes its own GPIO peripheral instance
+    for (const pin of sorted) {
+      defs.push({
+        family: 'GPIO',
+        name: pin,         // peripheral name == pin name (e.g. 'PA0')
+        port: port,        // for grouping in renderGpioBank
+        roles: [
+          { role: 'PIN', required: true, pins: [pin] }
+        ],
+      });
+    }
+  }
+  return defs;
+}
+// Append per-pin GPIO peripherals to the main peripheral list.
+PERIPHERAL_DEFS.push(...buildGpioDefs());
+
+
+/* ---------------------------------------------------------------------------
+   5. APPLICATION STATE
+      - devices     : list of all user-defined devices
+      - assignments : map of peripheralName -> [{ deviceId, pinChoices }]
+                      pinChoices: { roleName: pinName }
+                      e.g. { 'I2C1': [{ deviceId: 'uuid', pinChoices: { SCL: 'PB6', SDA: 'PB7' }}] }
+                      For optional roles not selected, the role key is omitted.
+      - pinOwnership: DERIVED map of pinName -> { deviceName, peripheral, deviceId }
+                      Only includes pins that are actually selected (in pinChoices).
+   --------------------------------------------------------------------------- */
+// v2: schema changed from per-peripheral all-pins ownership → per-role pin selection.
+const STORAGE_KEY = 'stm32h755_pin_tool_v2';
+
+let state = {
+  devices: [],     // [{ id, name, interfaceType, notes }]
+  assignments: {}, // { "I2C1": [{deviceId, pinChoices: {role: pin}}], ... }
+};
+let pinOwnership = {}; // derived on each render
+
+// Ephemeral UI state — NOT persisted to localStorage (resets on reload).
+// Keeps view preferences separate from the persisted data model.
+let viewState = {
+  showOnlyUsed: false,  // summary view: only peripherals with assignments
+};
+
+// Fast lookup map: peripheral name -> PERIPHERAL_DEF
+const DEF_BY_NAME = Object.fromEntries(PERIPHERAL_DEFS.map(d => [d.name, d]));
+
+
+/* ---------------------------------------------------------------------------
+   6. PERSISTENCE: localStorage + JSON import/export
+   --------------------------------------------------------------------------- */
+function saveToLocalStorage() {
+  // Only persist the core mutable state (devices + assignments)
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      devices: state.devices,
+      assignments: state.assignments,
+    }));
+  } catch (e) {
+    console.warn('localStorage save failed:', e);
+  }
+}
+
+function loadFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.devices) && typeof parsed.assignments === 'object') {
+      state.devices = parsed.devices;
+      state.assignments = parsed.assignments || {};
+    }
+  } catch (e) {
+    console.warn('localStorage load failed:', e);
+  }
+}
+
+function exportJson() {
+  // Clean { devices, assignments } dump, no internal-only fields
+  const payload = JSON.stringify({
+    devices: state.devices,
+    assignments: state.assignments,
+  }, null, 2);
+
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'stm32h755_pinmap.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Exported pinmap JSON', 'success');
+}
+
+function importJson(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const parsed = JSON.parse(e.target.result);
+      // Validate shape
+      if (!parsed || !Array.isArray(parsed.devices) || typeof parsed.assignments !== 'object') {
+        toast('Invalid JSON: missing "devices" or "assignments"', 'error');
+        return;
+      }
+      // Replace state wholesale
+      state.devices = parsed.devices;
+      state.assignments = parsed.assignments;
+      saveToLocalStorage();
+      render();
+      toast('Imported pinmap JSON', 'success');
+    } catch (err) {
+      toast('Failed to parse JSON: ' + err.message, 'error');
+    }
+  };
+  reader.readAsText(file);
+}
+
+
+/* ---------------------------------------------------------------------------
+   7. PIN OWNERSHIP + HELPERS
+      pinOwnership is derived fresh from state.assignments on every render.
+      Only pins actually SELECTED (present in pinChoices) are considered owned.
+   --------------------------------------------------------------------------- */
+function recomputePinOwnership() {
+  pinOwnership = {};
+  for (const [peripheralName, assignments] of Object.entries(state.assignments)) {
+    const def = DEF_BY_NAME[peripheralName];
+    if (!def || !assignments || assignments.length === 0) continue;
+
+    for (const assignment of assignments) {
+      const dev = state.devices.find(d => d.id === assignment.deviceId);
+      if (!dev) continue;
+
+      // Each selected pin in pinChoices becomes owned by this assignment.
+      for (const [role, pin] of Object.entries(assignment.pinChoices || {})) {
+        if (!pin) continue;                    // skip cleared/optional roles
+        if (!pinOwnership[pin]) {              // first-wins; defensive
+          pinOwnership[pin] = {
+            deviceName: dev.name,
+            peripheral: peripheralName,
+            deviceId: dev.id,                   // so chips can tell "me vs other"
+            role: role,
+          };
+        }
+      }
+    }
+  }
+}
+
+/** All pins currently selected by this single assignment (flat list). */
+function getOwnedPinsForAssignment(assignment) {
+  return Object.values(assignment.pinChoices || {}).filter(Boolean);
+}
+
+/** Is a pin "available" to this assignment?
+    - Not owned by anyone: available
+    - Owned by THIS assignment (same device + same peripheral): available
+      (so it can be re-selected in the same dropdown)
+    - Owned by anything else: not available
+    ownerDeviceId / ownerPeripheral describe the assignment doing the asking. */
+function isPinAvailable(pin, ownerDeviceId, ownerPeripheral) {
+  const owner = pinOwnership[pin];
+  if (!owner) return true;
+  if (owner.deviceId === ownerDeviceId && owner.peripheral === ownerPeripheral) return true;
+  return false;
+}
+
+/** Pick sensible default pins when a device is first dropped on a peripheral.
+    - 'all-required': for each REQUIRED role, pick the first available candidate
+    - 'at-least-one': pick the first role that has any available candidate
+    Returns { ok: true, pinChoices } or { ok: false, error }.
+    The `existingAssignment` argument, if present, treats that assignment's
+    current pins as available (used when moving a device between peripherals). */
+function getDefaultPinChoices(def, existingAssignment = null) {
+  const fam = FAMILIES[def.family];
+  const choices = {};
+
+  // Pins to treat as "already yours" (available to you) during a move
+  const movingPins = existingAssignment
+    ? new Set(getOwnedPinsForAssignment(existingAssignment))
+    : new Set();
+  const available = (pin) => movingPins.has(pin) || !pinOwnership[pin];
+
+  if (fam.selectionRule === 'all-required') {
+    // Every required role MUST get a pin. Optional roles default to unset.
+    for (const role of def.roles) {
+      if (!role.required) continue;
+      const pick = role.pins.find(available);
+      if (!pick) {
+        return { ok: false, error: `No free pin available for ${role.role}` };
+      }
+      choices[role.role] = pick;
+    }
+  } else if (fam.selectionRule === 'at-least-one') {
+    // Pick the first role whose (only) candidate is free.
+    for (const role of def.roles) {
+      const pick = role.pins.find(available);
+      if (pick) { choices[role.role] = pick; break; }
+    }
+    if (Object.keys(choices).length === 0) {
+      return { ok: false, error: 'No free channels available' };
+    }
+  }
+  return { ok: true, pinChoices: choices };
+}
+
+/** Validate that an assignment satisfies its family's selection rule.
+    Returns { valid: bool, errors: [string] }. */
+function validateAssignment(def, pinChoices) {
+  const fam = FAMILIES[def.family];
+  const errors = [];
+  if (fam.selectionRule === 'all-required') {
+    for (const role of def.roles) {
+      if (role.required && !pinChoices[role.role]) {
+        errors.push(`missing ${role.role}`);
+      }
+    }
+  } else if (fam.selectionRule === 'at-least-one') {
+    const selected = Object.values(pinChoices).filter(Boolean).length;
+    if (selected === 0) errors.push('pick at least one channel');
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/** Find a device's current assignment (if any) — returns { peripheral, assignment } or null. */
+function findDeviceAssignment(deviceId) {
+  for (const [periph, list] of Object.entries(state.assignments)) {
+    const a = list.find(x => x.deviceId === deviceId);
+    if (a) return { peripheral: periph, assignment: a };
+  }
+  return null;
+}
+
+
+/* ---------------------------------------------------------------------------
+   8. RENDERING
+      render() rebuilds the grid + tray from state. Cheap enough given size.
+   --------------------------------------------------------------------------- */
+function render() {
+  recomputePinOwnership();
+  renderGrid();
+  renderTray();
+}
+
+function renderGrid() {
+  const root = document.getElementById('grid-root');
+  root.innerHTML = '';
+
+  // Family sections in their canonical display order
+  const sections = [
+    { key: 'UART',  title: 'UART / USART' },
+    { key: 'I2C',   title: 'I2C' },
+    { key: 'SPI',   title: 'SPI' },
+    { key: 'FDCAN', title: 'FDCAN' },
+    { key: 'ETH',   title: 'Ethernet' },
+    { key: 'ADC',   title: 'ADC' },
+    { key: 'TIM',   title: 'Timers / PWM' },
+    { key: 'GPIO',  title: 'GPIO' },
+  ];
+
+  // Used-filter predicate: a peripheral is "in use" if any device is assigned
+  const peripheralIsUsed = (p) => (state.assignments[p.name] || []).length > 0;
+
+  let totalShown = 0;
+  for (const section of sections) {
+    let periphs = PERIPHERAL_DEFS.filter(p => p.family === section.key);
+    if (viewState.showOnlyUsed) {
+      periphs = periphs.filter(peripheralIsUsed);
+    }
+    if (periphs.length === 0) continue;
+
+    const sectionEl = document.createElement('section');
+    sectionEl.className = 'family-section';
+    const heading = document.createElement('h3');
+    heading.textContent = section.title;
+    sectionEl.appendChild(heading);
+
+    if (section.key === 'GPIO') {
+      // GPIO: one rendered bank per port. Each pin inside a bank has its
+      // own independent slot (so claiming PA2 doesn't lock the whole bank).
+      const byPort = {};
+      for (const p of periphs) {
+        if (!byPort[p.port]) byPort[p.port] = [];
+        byPort[p.port].push(p);
+      }
+      for (const port of Object.keys(byPort).sort()) {
+        sectionEl.appendChild(renderGpioBank(port, byPort[port]));
+      }
+    } else {
+      // Regular peripherals: one periph-group per instance
+      for (const def of periphs) {
+        sectionEl.appendChild(renderPeripheralGroup(def));
+      }
+    }
+    root.appendChild(sectionEl);
+    totalShown += periphs.length;
+  }
+
+  if (viewState.showOnlyUsed && totalShown === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.innerHTML = 'No peripherals in use yet.<br>Assign a device to a peripheral, or toggle back to see all available peripherals.';
+    root.appendChild(empty);
+  }
+
+  updateViewCount(totalShown);
+}
+
+/** Updates the count text shown next to the grid heading.
+    Note: when summary view is off, we show "X of Y peripherals in use" where
+    Y excludes GPIO pins (there are too many, so we only count non-GPIO). */
+function updateViewCount(shown) {
+  const countEl = document.getElementById('view-count');
+  if (!countEl) return;
+  if (viewState.showOnlyUsed) {
+    countEl.textContent = `— ${shown} in use`;
+  } else {
+    const used = PERIPHERAL_DEFS.filter(p => (state.assignments[p.name] || []).length > 0).length;
+    countEl.textContent = `— ${used} in use`;
+  }
+}
+
+function renderPeripheralGroup(def) {
+  const fam = FAMILIES[def.family];
+  const group = document.createElement('div');
+  group.className = 'periph-group';
+  group.style.setProperty('--fam', fam.color);
+  group.dataset.peripheral = def.name;
+
+  // Flatten all candidate pins across all roles into [{pin, role}] rows.
+  // This is what shows in column 2 — every pin that COULD be used by this
+  // peripheral, tagged with the role it would fulfill. Conflict state is
+  // computed per-row against pinOwnership.
+  const pinRows = [];
+  for (const role of def.roles) {
+    for (const pin of role.pins) {
+      pinRows.push({ pin, role: role.role });
+    }
+  }
+
+  // One grid row per pin candidate
+  group.style.gridTemplateRows = `repeat(${pinRows.length}, auto)`;
+
+  // Col 1: peripheral label (merged across all rows)
+  const labelEl = document.createElement('div');
+  labelEl.className = 'periph-label';
+  labelEl.textContent = def.name;
+  group.appendChild(labelEl);
+
+  // Col 2: one pin cell per candidate
+  for (const row of pinRows) {
+    group.appendChild(renderPinCell(row.pin, row.role, def.name));
+  }
+
+  // Col 3: devices area
+  group.appendChild(renderDevicesArea(def));
+
+  // Mark full for capacity-limited peripherals (UART max:1, ETH max:1, GPIO max:1)
+  const assigned = state.assignments[def.name] || [];
+  if (fam.max !== Infinity && assigned.length >= fam.max) {
+    group.classList.add('full');
+  }
+
+  return group;
+}
+
+/* GPIO bank — one port rendered as a single card, but each PIN inside it has
+   its own independent slot. Assigning a device to PA2 only claims PA2; PA0,
+   PA1, etc. remain available. */
+function renderGpioBank(port, pinDefs) {
+  const fam = FAMILIES.GPIO;
+  const bank = document.createElement('div');
+  bank.className = 'gpio-bank';
+  bank.style.setProperty('--fam', fam.color);
+
+  // Bank label spans all pin rows (CSS grid-row set via inline style)
+  const labelEl = document.createElement('div');
+  labelEl.className = 'periph-label';
+  labelEl.textContent = 'GPIO' + port;
+  bank.appendChild(labelEl);
+
+  // Pin rows container (a vertical stack)
+  const pinsEl = document.createElement('div');
+  pinsEl.className = 'gpio-pins';
+
+  for (const def of pinDefs) {
+    const row = document.createElement('div');
+    row.className = 'gpio-pin-row';
+    row.dataset.peripheral = def.name;
+
+    // Left: pin cell showing the pin name + #LQFP number (or conflict note)
+    // For GPIO, the "role" label is redundant (always 'PIN'), so pass blank.
+    row.appendChild(renderPinCell(def.name, '', def.name));
+
+    // Right: devices area (max 1 device for GPIO pins)
+    row.appendChild(renderDevicesArea(def));
+
+    // Mark full if this specific pin has a device
+    if ((state.assignments[def.name] || []).length >= fam.max) {
+      row.classList.add('full');
+    }
+
+    pinsEl.appendChild(row);
+  }
+
+  bank.appendChild(pinsEl);
+  return bank;
+}
+
+/*
+  Devices area for ONE peripheral. Layout:
+    [ slot-chip | slot-chip | slot-chip | ... | drop-zone ]
+  Each slot-chip is a full-height column, chained horizontally.
+  The drop-zone sits at the end (hidden entirely if peripheral is at capacity).
+*/
+function renderDevicesArea(def) {
+  const fam = FAMILIES[def.family];
+  const areaEl = document.createElement('div');
+  areaEl.className = 'devices-area';
+  areaEl.dataset.peripheral = def.name;
+  areaEl.style.setProperty('--fam', fam.color);
+
+  // Drop target handlers (read currentTarget.dataset.peripheral)
+  areaEl.addEventListener('dragover',  onSlotsDragOver);
+  areaEl.addEventListener('dragleave', onSlotsDragLeave);
+  areaEl.addEventListener('drop',      onSlotsDrop);
+
+  const assignments = state.assignments[def.name] || [];
+  if (assignments.length === 0) areaEl.classList.add('empty');
+
+  // Render each assignment as a chip (each has its own pinChoices)
+  for (const assignment of assignments) {
+    const device = state.devices.find(d => d.id === assignment.deviceId);
+    if (!device) continue; // stale reference
+    areaEl.appendChild(renderSlotChip(device, def, assignment));
+  }
+
+  // Trailing drop zone (CSS hides when periph is .full)
+  const dropZone = document.createElement('div');
+  dropZone.className = 'drop-zone';
+  dropZone.textContent = assignments.length === 0 ? 'drop device here' : '+ chain another';
+  areaEl.appendChild(dropZone);
+
+  return areaEl;
+}
+
+/*
+  Device chip — a tall vertical column that occupies the full height of the
+  peripheral's row group. Each role gets a dropdown for picking its pin;
+  invalid pins (already owned elsewhere) appear but are disabled.
+*/
+function renderSlotChip(device, def, assignment) {
+  const fam = FAMILIES[def.family];
+  const chip = document.createElement('div');
+  chip.className = 'slot-chip';
+  chip.style.setProperty('--fam', fam.color);
+  chip.draggable = true;
+  chip.dataset.deviceId = device.id;
+  chip.dataset.fromPeripheral = def.name;
+
+  // --- Header row: name + type badge + remove button ---
+  const header = document.createElement('div');
+  header.className = 'chip-header';
+
+  const nameEl = document.createElement('span');
+  nameEl.className = 'chip-name';
+  nameEl.textContent = device.name;
+  nameEl.title = device.name;
+  header.appendChild(nameEl);
+
+  const typeEl = document.createElement('span');
+  typeEl.className = 'chip-type';
+  typeEl.textContent = device.interfaceType;
+  header.appendChild(typeEl);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'chip-remove';
+  removeBtn.textContent = '×';
+  removeBtn.title = 'Remove from ' + def.name;
+  removeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    unassignDevice(device.id, def.name);
+  });
+  header.appendChild(removeBtn);
+
+  chip.appendChild(header);
+
+  // --- Role selectors: one dropdown per role ---
+  const rolesList = document.createElement('div');
+  rolesList.className = 'roles-list';
+  for (const role of def.roles) {
+    rolesList.appendChild(renderRoleSelector(role, def, assignment));
+  }
+  chip.appendChild(rolesList);
+
+  // --- Validation warning if assignment breaks its family rule ---
+  const validation = validateAssignment(def, assignment.pinChoices || {});
+  if (!validation.valid) {
+    const warn = document.createElement('div');
+    warn.className = 'validation-warning';
+    warn.textContent = '⚠ ' + validation.errors.join('; ');
+    chip.appendChild(warn);
+  }
+
+  // --- Notes preview (if any) ---
+  if (device.notes && device.notes.trim()) {
+    const notesEl = document.createElement('div');
+    notesEl.className = 'chip-notes';
+    notesEl.textContent = device.notes.trim();
+    notesEl.title = device.notes;
+    chip.appendChild(notesEl);
+  }
+
+  // Drag handlers (moving/unassigning)
+  chip.addEventListener('dragstart', onChipDragStart);
+  chip.addEventListener('dragend',   onChipDragEnd);
+
+  return chip;
+}
+
+/* One role's dropdown inside a chip. Shows [ROLE_LABEL] [<select>].
+   Options list every candidate pin; pins owned by OTHER assignments appear
+   disabled with an inline "used by X on Y" note. */
+function renderRoleSelector(role, def, assignment) {
+  const row = document.createElement('div');
+  row.className = 'role-row';
+
+  const label = document.createElement('span');
+  label.className = 'role-label' + (role.required ? ' required' : '');
+  label.textContent = role.role;
+  label.title = role.required ? `${role.role} — required` : `${role.role} — optional`;
+  row.appendChild(label);
+
+  const select = document.createElement('select');
+  select.className = 'role-select';
+
+  const currentPin = (assignment.pinChoices || {})[role.role] || '';
+  if (!currentPin) select.classList.add('empty');
+  if (role.required && !currentPin) select.classList.add('missing');
+
+  // Blank option: always present for optional roles, or to represent "unset"
+  // for required roles that currently have no pin.
+  if (!role.required || !currentPin) {
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = role.required ? '— select pin —' : '— unused —';
+    select.appendChild(blank);
+  }
+
+  // Each candidate pin becomes an option. A pin is AVAILABLE if no one owns
+  // it, OR it's owned by THIS very role on THIS very assignment (so the
+  // currently-selected pin stays re-selectable).
+  for (const pin of role.pins) {
+    const opt = document.createElement('option');
+    opt.value = pin;
+    const owner = pinOwnership[pin];
+    const ownedElsewhere = owner && !(
+      owner.deviceId   === assignment.deviceId &&
+      owner.peripheral === def.name &&
+      owner.role       === role.role
+    );
+    const pinInfo = PIN_DATA[pin];
+    if (ownedElsewhere) {
+      opt.disabled = true;
+      opt.textContent = `${pin} — used by ${owner.deviceName} on ${owner.peripheral}`;
+    } else {
+      opt.textContent = pinInfo ? `${pin}  (#${pinInfo.lqfp144_pin})` : pin;
+    }
+    select.appendChild(opt);
+  }
+
+  select.value = currentPin;
+
+  select.addEventListener('change', (e) => {
+    changePinChoice(def.name, assignment.deviceId, role.role, e.target.value);
+  });
+  // Prevent accidental drag-starts when the user is clicking on the dropdown
+  select.addEventListener('mousedown', (e) => e.stopPropagation());
+
+  row.appendChild(select);
+  return row;
+}
+
+function renderPinCell(pin, role, peripheralName) {
+  const cell = document.createElement('div');
+  cell.className = 'pin-cell';
+  cell.dataset.pin = pin;
+
+  // Pin name
+  const nameEl = document.createElement('span');
+  nameEl.className = 'pin-name';
+  nameEl.textContent = pin;
+  cell.appendChild(nameEl);
+
+  // Role label (TX/RX/SCL/etc.) — empty for GPIO rows
+  if (role) {
+    const roleEl = document.createElement('span');
+    roleEl.className = 'pin-role';
+    roleEl.textContent = role;
+    cell.appendChild(roleEl);
+  }
+
+  // LQFP144 pin number (right-aligned)
+  const pinInfo = PIN_DATA[pin];
+  if (pinInfo) {
+    const numEl = document.createElement('span');
+    numEl.className = 'pin-number';
+    numEl.textContent = '#' + pinInfo.lqfp144_pin;
+    cell.appendChild(numEl);
+  }
+
+  // Conflict state: owned by a device on a different peripheral
+  const owner = pinOwnership[pin];
+  if (owner && owner.peripheral !== peripheralName) {
+    cell.classList.add('conflict');
+    // Replace pin number with conflict note (title attribute lets user hover
+    // to see the full text if the column truncates it)
+    const numberEl = cell.querySelector('.pin-number');
+    if (numberEl) cell.removeChild(numberEl);
+    const note = document.createElement('span');
+    note.className = 'conflict-note';
+    const fullText = `used by ${owner.deviceName} on ${owner.peripheral}`;
+    note.textContent = fullText;
+    note.title = fullText;
+    cell.appendChild(note);
+  }
+
+  return cell;
+}
+
+function renderTray() {
+  const listEl = document.getElementById('device-list');
+  listEl.innerHTML = '';
+
+  for (const device of state.devices) {
+    const assigned = isDeviceAssigned(device.id);
+    const card = document.createElement('div');
+    card.className = 'tray-card' + (assigned ? ' assigned' : '');
+    card.draggable = true;
+    card.dataset.deviceId = device.id;
+    card.dataset.fromPeripheral = ''; // from tray, not from a slot
+
+    // Colour stripe matches first-accepting family (UART/USART -> UART colour)
+    const matchingFamKey = Object.keys(FAMILIES).find(k =>
+      FAMILIES[k].accepts.includes(device.interfaceType)
+    );
+    if (matchingFamKey) {
+      card.style.setProperty('--fam', FAMILIES[matchingFamKey].color);
+    }
+
+    // Name
+    const nameEl = document.createElement('span');
+    nameEl.className = 'tc-name';
+    nameEl.textContent = device.name;
+    card.appendChild(nameEl);
+
+    // Type badge
+    const typeEl = document.createElement('span');
+    typeEl.className = 'tc-type';
+    typeEl.textContent = device.interfaceType;
+    card.appendChild(typeEl);
+
+    // Delete button (removes device from system entirely — also unassigns it)
+    const delBtn = document.createElement('button');
+    delBtn.className = 'tc-del';
+    delBtn.textContent = '🗑';
+    delBtn.title = 'Delete device';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteDevice(device.id);
+    });
+    card.appendChild(delBtn);
+
+    // Drag handlers
+    card.addEventListener('dragstart', onTrayCardDragStart);
+    card.addEventListener('dragend', onChipDragEnd);
+
+    listEl.appendChild(card);
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   9. DRAG & DROP
+      We use the HTML5 native API. A global `currentDrag` stores info about
+      the device being dragged, so drop targets can validate compatibility.
+   --------------------------------------------------------------------------- */
+let currentDrag = null; // { deviceId, interfaceType, fromPeripheral }
+
+function onTrayCardDragStart(e) {
+  const card = e.currentTarget;
+  const deviceId = card.dataset.deviceId;
+  const device = state.devices.find(d => d.id === deviceId);
+  if (!device) return;
+
+  // If this device is already assigned somewhere, treat that as the "from"
+  // peripheral so moves respect conflicts correctly (the pins at that
+  // peripheral will be freed when we perform the move).
+  let currentHome = null;
+  for (const [periph, list] of Object.entries(state.assignments)) {
+    if (list.some(a => a.deviceId === deviceId)) { currentHome = periph; break; }
+  }
+
+  currentDrag = {
+    deviceId,
+    interfaceType: device.interfaceType,
+    fromPeripheral: currentHome,
+  };
+  card.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', deviceId);
+}
+
+function onChipDragStart(e) {
+  const chip = e.currentTarget;
+  const deviceId = chip.dataset.deviceId;
+  const fromPeripheral = chip.dataset.fromPeripheral;
+  const device = state.devices.find(d => d.id === deviceId);
+  if (!device) return;
+
+  currentDrag = {
+    deviceId,
+    interfaceType: device.interfaceType,
+    fromPeripheral,
+  };
+  chip.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', deviceId);
+}
+
+function onChipDragEnd(e) {
+  // Clean up visual state on both success and cancel
+  e.currentTarget.classList.remove('dragging');
+  // Also clear any stale drop-valid/invalid classes from any devices area
+  document.querySelectorAll('.devices-area.drop-valid, .devices-area.drop-invalid')
+    .forEach(el => el.classList.remove('drop-valid', 'drop-invalid'));
+  currentDrag = null;
+}
+
+function onSlotsDragOver(e) {
+  if (!currentDrag) return;
+
+  const slotsEl = e.currentTarget;
+  const peripheralName = slotsEl.dataset.peripheral;
+  const def = DEF_BY_NAME[peripheralName];
+  if (!def) return;
+
+  // Compatibility + capacity + already-here checks
+  const compatible = isCompatible(currentDrag.interfaceType, def.family);
+  const hasCapacity = hasFreeSlot(def, currentDrag.deviceId);
+  const isSamePeripheral = currentDrag.fromPeripheral === peripheralName;
+  const alreadyHere = (state.assignments[peripheralName] || [])
+    .some(a => a.deviceId === currentDrag.deviceId);
+
+  // Can we actually come up with default pin choices here? If not, invalid.
+  // For moves, the source assignment's pins are considered available.
+  let canAssign = true;
+  if (compatible && hasCapacity && !alreadyHere) {
+    const existing = findDeviceAssignment(currentDrag.deviceId);
+    const result = getDefaultPinChoices(def, existing ? existing.assignment : null);
+    canAssign = result.ok;
+  }
+
+  const valid = compatible && (hasCapacity || isSamePeripheral) && !alreadyHere && canAssign;
+
+  e.preventDefault();                       // must preventDefault to allow drop
+  e.dataTransfer.dropEffect = valid ? 'move' : 'none';
+
+  slotsEl.classList.toggle('drop-valid',   valid);
+  slotsEl.classList.toggle('drop-invalid', !valid);
+}
+
+function onSlotsDragLeave(e) {
+  const slotsEl = e.currentTarget;
+  if (!slotsEl.contains(e.relatedTarget)) {
+    slotsEl.classList.remove('drop-valid', 'drop-invalid');
+  }
+}
+
+function onSlotsDrop(e) {
+  e.preventDefault();
+  const slotsEl = e.currentTarget;
+  slotsEl.classList.remove('drop-valid', 'drop-invalid');
+
+  if (!currentDrag) return;
+  const peripheralName = slotsEl.dataset.peripheral;
+  const def = DEF_BY_NAME[peripheralName];
+  if (!def) return;
+
+  // Compatibility check
+  if (!isCompatible(currentDrag.interfaceType, def.family)) {
+    toast(`${currentDrag.interfaceType} can't go on ${peripheralName}`, 'error');
+    return;
+  }
+
+  // Already assigned to this peripheral? no-op.
+  const alreadyHere = (state.assignments[peripheralName] || [])
+    .some(a => a.deviceId === currentDrag.deviceId);
+  if (alreadyHere) return;
+
+  // Capacity check
+  if (!hasFreeSlot(def, currentDrag.deviceId)) {
+    toast(`${peripheralName} is full (max ${FAMILIES[def.family].max})`, 'error');
+    return;
+  }
+
+  // Compute default pin choices. For moves, source's current pins are free.
+  const existing = findDeviceAssignment(currentDrag.deviceId);
+  const result = getDefaultPinChoices(def, existing ? existing.assignment : null);
+  if (!result.ok) {
+    toast(`Can't assign to ${peripheralName}: ${result.error}`, 'error');
+    return;
+  }
+
+  // Perform the assignment with the auto-picked default pinChoices
+  assignDevice(currentDrag.deviceId, peripheralName, result.pinChoices);
+}
+
+/** Does this interface type fit this peripheral family? */
+function isCompatible(interfaceType, family) {
+  return FAMILIES[family].accepts.includes(interfaceType);
+}
+
+/** Does this peripheral have a free slot for the given device?
+    Returns false if the device is already in this peripheral, or if capacity is full. */
+function hasFreeSlot(def, deviceId) {
+  const fam = FAMILIES[def.family];
+  const list = state.assignments[def.name] || [];
+  if (list.some(a => a.deviceId === deviceId)) return false;
+  return list.length < fam.max;
+}
+
+/** Is the device currently assigned anywhere in the system? */
+function isDeviceAssigned(deviceId) {
+  return Object.values(state.assignments)
+    .some(list => list.some(a => a.deviceId === deviceId));
+}
+
+
+/* ---------------------------------------------------------------------------
+   10. STATE MUTATIONS — every change ends with saveToLocalStorage + render
+   --------------------------------------------------------------------------- */
+
+/** Assign a device to a peripheral with specific pinChoices.
+    Strips the device from any previous assignment (a device can only be in
+    one place at a time). */
+function assignDevice(deviceId, toPeripheral, pinChoices) {
+  // Remove from any other peripheral it's currently on
+  for (const periphName of Object.keys(state.assignments)) {
+    if (periphName === toPeripheral) continue;
+    removeDeviceFromPeripheral(deviceId, periphName);
+  }
+  if (!state.assignments[toPeripheral]) state.assignments[toPeripheral] = [];
+  // If somehow already assigned to target, don't add a duplicate
+  if (!state.assignments[toPeripheral].some(a => a.deviceId === deviceId)) {
+    state.assignments[toPeripheral].push({ deviceId, pinChoices });
+  }
+  saveToLocalStorage();
+  render();
+}
+
+function unassignDevice(deviceId, fromPeripheral) {
+  removeDeviceFromPeripheral(deviceId, fromPeripheral);
+  saveToLocalStorage();
+  render();
+}
+
+function removeDeviceFromPeripheral(deviceId, peripheralName) {
+  const list = state.assignments[peripheralName];
+  if (!list) return;
+  const idx = list.findIndex(a => a.deviceId === deviceId);
+  if (idx >= 0) list.splice(idx, 1);
+  if (list.length === 0) delete state.assignments[peripheralName];
+}
+
+/** Update a single pin choice on an existing assignment.
+    `newPin` of '' means clear the role (only valid for optional roles).
+    Rejects the change if the pin is already owned by another role/assignment. */
+function changePinChoice(peripheralName, deviceId, role, newPin) {
+  const list = state.assignments[peripheralName];
+  if (!list) return;
+  const assignment = list.find(a => a.deviceId === deviceId);
+  if (!assignment) return;
+
+  if (!assignment.pinChoices) assignment.pinChoices = {};
+
+  if (newPin === '') {
+    // Clear the role
+    delete assignment.pinChoices[role];
+  } else {
+    // Validate: is this pin available to us?
+    const owner = pinOwnership[newPin];
+    const ownedElsewhere = owner && !(
+      owner.deviceId === deviceId &&
+      owner.peripheral === peripheralName &&
+      owner.role === role
+    );
+    if (ownedElsewhere) {
+      toast(`${newPin} is already in use by ${owner.deviceName} on ${owner.peripheral}`, 'error');
+      render();  // force re-render so dropdown snaps back to previous value
+      return;
+    }
+    assignment.pinChoices[role] = newPin;
+  }
+
+  saveToLocalStorage();
+  render();
+}
+
+function addDevice({ name, interfaceType, notes }) {
+  const device = {
+    id: crypto.randomUUID(),
+    name: name.trim(),
+    interfaceType,
+    notes: notes.trim(),
+  };
+  state.devices.push(device);
+  saveToLocalStorage();
+  render();
+}
+
+function deleteDevice(deviceId) {
+  if (!confirm('Delete this device? It will be removed from any peripheral it is assigned to.')) return;
+  // Strip from every assignment list
+  for (const periphName of Object.keys(state.assignments)) {
+    const list = state.assignments[periphName];
+    const idx = list.findIndex(a => a.deviceId === deviceId);
+    if (idx >= 0) list.splice(idx, 1);
+    if (list.length === 0) delete state.assignments[periphName];
+  }
+  state.devices = state.devices.filter(d => d.id !== deviceId);
+  saveToLocalStorage();
+  render();
+}
+
+
+/* ---------------------------------------------------------------------------
+   11. MODAL — add device form with accessible focus trap
+   --------------------------------------------------------------------------- */
+const modalOverlay = document.getElementById('modal-overlay');
+const modalForm    = document.getElementById('device-form');
+const modalError   = document.getElementById('modal-error');
+const nameInput    = document.getElementById('device-name');
+const typeSelect   = document.getElementById('device-type');
+const notesInput   = document.getElementById('device-notes');
+
+let lastFocusedBeforeModal = null;
+
+function openModal() {
+  lastFocusedBeforeModal = document.activeElement;
+  modalOverlay.classList.remove('hidden');
+  modalOverlay.setAttribute('aria-hidden', 'false');
+  // Reset form
+  modalForm.reset();
+  modalError.textContent = '';
+  // Focus first field after a micro-tick so the browser picks it up
+  setTimeout(() => nameInput.focus(), 0);
+  // Focus trap listener
+  document.addEventListener('keydown', onModalKeydown);
+}
+
+function closeModal() {
+  modalOverlay.classList.add('hidden');
+  modalOverlay.setAttribute('aria-hidden', 'true');
+  document.removeEventListener('keydown', onModalKeydown);
+  if (lastFocusedBeforeModal) lastFocusedBeforeModal.focus();
+}
+
+function onModalKeydown(e) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeModal();
+    return;
+  }
+  if (e.key !== 'Tab') return;
+
+  // Focus trap: keep Tab / Shift+Tab inside the modal
+  const focusables = modalOverlay.querySelectorAll(
+    'input, select, textarea, button, [tabindex]:not([tabindex="-1"])'
+  );
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last  = focusables[focusables.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+// Form submit: validate then add device
+modalForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  modalError.textContent = '';
+
+  const name  = nameInput.value.trim();
+  const type  = typeSelect.value;
+  const notes = notesInput.value;
+
+  if (!name) { modalError.textContent = 'Name is required.'; nameInput.focus(); return; }
+  if (!type) { modalError.textContent = 'Interface type is required.'; typeSelect.focus(); return; }
+
+  // Duplicate name check (soft warning via confirm)
+  if (state.devices.some(d => d.name.toLowerCase() === name.toLowerCase())) {
+    if (!confirm(`A device named "${name}" already exists. Add anyway?`)) return;
+  }
+
+  addDevice({ name, interfaceType: type, notes });
+  closeModal();
+  toast(`Added ${name}`, 'success');
+});
+
+document.getElementById('modal-cancel').addEventListener('click', closeModal);
+// Click-outside to close
+modalOverlay.addEventListener('click', (e) => {
+  if (e.target === modalOverlay) closeModal();
+});
+
+
+/* ---------------------------------------------------------------------------
+   12. TOP-LEVEL BUTTON WIRING
+   --------------------------------------------------------------------------- */
+document.getElementById('add-device-btn').addEventListener('click', openModal);
+document.getElementById('export-btn').addEventListener('click', exportJson);
+document.getElementById('import-btn').addEventListener('click', () => {
+  document.getElementById('import-input').click();
+});
+document.getElementById('import-input').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (file) importJson(file);
+  e.target.value = ''; // allow re-importing same filename
+});
+
+// Summary view toggle: switches renderGrid between "all peripherals" and
+// "only those currently in use". Updates button label + style.
+document.getElementById('toggle-view-btn').addEventListener('click', () => {
+  viewState.showOnlyUsed = !viewState.showOnlyUsed;
+  const btn = document.getElementById('toggle-view-btn');
+  btn.textContent = viewState.showOnlyUsed ? '📋 Show all' : '📋 In-use only';
+  btn.classList.toggle('btn-primary', viewState.showOnlyUsed);
+  render();
+});
+
+// Tray as a drop target: dragging a chip back here unassigns it.
+const deviceListEl = document.getElementById('device-list');
+deviceListEl.addEventListener('dragover', (e) => {
+  // Only accept drops that came from a slot (not tray-to-tray)
+  if (currentDrag && currentDrag.fromPeripheral) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    deviceListEl.style.background = 'rgba(63, 185, 80, 0.08)';
+  }
+});
+deviceListEl.addEventListener('dragleave', (e) => {
+  // Only reset if the drag actually left this element
+  if (!deviceListEl.contains(e.relatedTarget)) {
+    deviceListEl.style.background = '';
+  }
+});
+deviceListEl.addEventListener('drop', (e) => {
+  deviceListEl.style.background = '';
+  if (currentDrag && currentDrag.fromPeripheral) {
+    e.preventDefault();
+    unassignDevice(currentDrag.deviceId, currentDrag.fromPeripheral);
+  }
+});
+
+
+/* ---------------------------------------------------------------------------
+   13. TOAST — small transient status messages
+   --------------------------------------------------------------------------- */
+let toastTimer = null;
+function toast(msg, kind = 'info') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + kind;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ''; }, 2600);
+}
+
+
+/* ---------------------------------------------------------------------------
+   14. BOOT
+   --------------------------------------------------------------------------- */
+loadFromLocalStorage();
+render();
+</script>
+</body>
+</html>
